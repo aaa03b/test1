@@ -495,8 +495,23 @@ class PDFEditorWindow(QMainWindow):
         self.scroll_area.setAlignment(Qt.AlignHCenter)
         self.scroll_area.setStyleSheet("background: #3c3c3c;")
 
+        # Use a stacked container so the canvas is never destroyed
+        from PyQt5.QtWidgets import QStackedWidget
+        self._stack = QStackedWidget()
+
+        self._placeholder = QLabel("Open a PDF file to begin editing")
+        self._placeholder.setAlignment(Qt.AlignCenter)
+        self._placeholder.setStyleSheet(
+            "color: #aaa; font-size: 18px; background: #3c3c3c;")
+        self._placeholder.setMinimumSize(600, 400)
+
         self.page_canvas = PageCanvas()
-        self.scroll_area.setWidget(self.page_canvas)
+
+        self._stack.addWidget(self._placeholder)  # index 0
+        self._stack.addWidget(self.page_canvas)   # index 1
+        self._stack.setCurrentIndex(0)
+
+        self.scroll_area.setWidget(self._stack)
 
         # Properties panel (right)
         self.props_panel = self._build_props_panel()
@@ -1100,12 +1115,7 @@ class PDFEditorWindow(QMainWindow):
 
     def _update_ui_state(self):
         has_doc = self._doc is not None
-        self.page_canvas.setVisible(has_doc)
-        if not has_doc:
-            placeholder = QLabel("Open a PDF file to begin editing")
-            placeholder.setAlignment(Qt.AlignCenter)
-            placeholder.setStyleSheet("color: #aaa; font-size: 18px;")
-            self.scroll_area.setWidget(placeholder)
+        self._stack.setCurrentIndex(1 if has_doc else 0)
 
     def _ask_save(self):
         reply = QMessageBox.question(
