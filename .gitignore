@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# App data
+sheets_data.db
+credentials.json
+config.json
+
+# OS
+.DS_Store
