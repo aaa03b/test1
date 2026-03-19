@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Bottle web dashboard for sheets_sync data.
 
@@ -528,7 +530,11 @@ def export_csv(name):
 @route("/import", method="GET")
 def import_form():
     tables = user_tables()
-    table_opts = "".join(f'<option value="{t}">{t}</option>' for t in tables)
+    if tables:
+        links = ", ".join('<a href="/table/' + t + '">' + t + "</a>" for t in tables)
+        tables_note = "<p class='meta'>Existing tables: " + links + "</p>"
+    else:
+        tables_note = ""
 
     return f"""<!DOCTYPE html>
 <html>
@@ -566,7 +572,7 @@ def import_form():
       </div>
     </form>
   </div>
-  {"<p class='meta'>Existing tables: " + ", ".join(f'<a href=\"/table/{t}\">{t}</a>' for t in tables) + "</p>" if tables else ""}
+  {tables_note}
 </div>
 </body></html>"""
 

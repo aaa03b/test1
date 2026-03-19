@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Google Sheets -> SQLite sync script.
 
