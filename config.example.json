@@ -1,0 +1,19 @@
+{
+  "_comment": "Copy this file to config.json and fill in your values.",
+
+  "credentials_file": "credentials.json",
+
+  "sheets": [
+    {
+      "_comment": "spreadsheet_id is the long ID in the Google Sheets URL",
+      "spreadsheet_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms",
+      "worksheet": "Sheet1",
+      "table_name": "my_sheet"
+    },
+    {
+      "spreadsheet_id": "ANOTHER_SPREADSHEET_ID",
+      "worksheet": null,
+      "table_name": "second_sheet"
+    }
+  ]
+}
