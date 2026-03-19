@@ -100,7 +100,49 @@ def ensure_meta_table(conn: sqlite3.Connection):
             row_count   INTEGER NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _col_labels (
+            table_name  TEXT NOT NULL,
+            safe_col    TEXT NOT NULL,
+            orig_label  TEXT NOT NULL,
+            PRIMARY KEY (table_name, safe_col)
+        )
+    """)
     conn.commit()
+
+
+def get_col_labels(table_name: str) -> dict[str, str]:
+    """Return {safe_col: original_label} for a table, falling back to safe_col."""
+    if not DB_FILE.exists():
+        return {}
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT safe_col, orig_label FROM _col_labels WHERE table_name = ?",
+            [table_name],
+        ).fetchall()
+        return {r["safe_col"]: r["orig_label"] for r in rows}
+    except sqlite3.OperationalError:
+        return {}
+    finally:
+        conn.close()
+
+
+def col_distinct_values(table_name: str, col: str, limit: int = 20) -> list[str]:
+    """Return up to `limit` distinct non-empty values for a column (for datalist)."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            f'SELECT DISTINCT "{col}" FROM "{table_name}" '
+            f'WHERE "{col}" IS NOT NULL AND "{col}" != "" '
+            f'ORDER BY "{col}" LIMIT ?',
+            [limit],
+        ).fetchall()
+        return [r[0] for r in rows]
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        conn.close()
 
 
 def table_columns(table_name: str) -> list[str]:
@@ -148,8 +190,8 @@ def sanitize(name: str) -> str:
 def make_unique_columns(headers: list[str]) -> list[str]:
     seen: dict[str, int] = {}
     result = []
-    for h in headers:
-        s = sanitize(h) or "_col"
+    for hdr in headers:
+        s = sanitize(hdr) or "_col"
         if s in seen:
             seen[s] += 1
             s = f"{s}_{seen[s]}"
@@ -178,6 +220,13 @@ def upsert_table(conn: sqlite3.Connection, table_name: str,
     for col in safe_cols:
         if col not in existing:
             conn.execute(f'ALTER TABLE "{safe_table}" ADD COLUMN "{col}" TEXT')
+
+    # Persist original header labels (safe_col → original header text)
+    for orig, safe in zip(headers, safe_cols):
+        conn.execute(
+            "INSERT OR REPLACE INTO _col_labels (table_name, safe_col, orig_label) VALUES (?, ?, ?)",
+            [safe_table, safe, orig.strip()],
+        )
 
     if replace:
         conn.execute(f'DELETE FROM "{safe_table}"')
@@ -367,8 +416,9 @@ def browse_table(name):
     cols, rows, total = fetch_rows(name, search, page, per_page)
     data_cols = [c for c in cols if not c.startswith("_")]
     total_pages = max(1, (total + per_page - 1) // per_page)
+    labels = get_col_labels(name)
 
-    thead = "".join(f"<th>{c}</th>" for c in data_cols) + "<th></th>"
+    thead = "".join(f'<th>{h(labels.get(c, c))}</th>' for c in data_cols) + "<th></th>"
 
     tbody = ""
     if rows:
@@ -487,14 +537,23 @@ def edit_row(name, row_num):
         raise HTTPError(404, f"Row {row_num} not found in table '{name}'")
 
     row = dict(row)
+    labels = get_col_labels(name)
     fields_html = ""
     for c in data_cols:
         val = row.get(c, "")
+        label_text = h(labels.get(c, c))
         if len(str(val)) > 80:
             widget = f'<textarea name="{c}" rows="3">{h(val)}</textarea>'
         else:
-            widget = f'<input type="text" name="{c}" value="{h(val)}">'
-        fields_html += f'<div class="form-group"><label>{h(c)}</label>{widget}</div>'
+            suggestions = col_distinct_values(name, c)
+            if 1 < len(suggestions) <= 15:
+                dl_id = f"dl_{c}"
+                opts = "".join(f'<option value="{h(v)}">' for v in suggestions)
+                datalist = f'<datalist id="{dl_id}">{opts}</datalist>'
+                widget = f'{datalist}<input type="text" name="{c}" value="{h(val)}" list="{dl_id}" autocomplete="off">'
+            else:
+                widget = f'<input type="text" name="{c}" value="{h(val)}">'
+        fields_html += f'<div class="form-group"><label>{label_text}</label>{widget}</div>'
 
     return f"""<!DOCTYPE html>
 <html>
@@ -552,11 +611,19 @@ def new_row(name):
         bottle.redirect(f"/table/{name}?msg=Row+added.&type=success")
 
     conn.close()
-    fields_html = "".join(
-        f'<div class="form-group"><label>{h(c)}</label>'
-        f'<input type="text" name="{c}" value=""></div>'
-        for c in data_cols
-    )
+    labels = get_col_labels(name)
+    fields_html = ""
+    for c in data_cols:
+        label_text = h(labels.get(c, c))
+        suggestions = col_distinct_values(name, c)
+        if 1 < len(suggestions) <= 15:
+            dl_id = f"dl_{c}"
+            opts = "".join(f'<option value="{h(v)}">' for v in suggestions)
+            datalist = f'<datalist id="{dl_id}">{opts}</datalist>'
+            widget = f'{datalist}<input type="text" name="{c}" value="" list="{dl_id}" autocomplete="off">'
+        else:
+            widget = f'<input type="text" name="{c}" value="">'
+        fields_html += f'<div class="form-group"><label>{label_text}</label>{widget}</div>'
 
     return f"""<!DOCTYPE html>
 <html>
