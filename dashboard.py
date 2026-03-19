@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-Bottle web dashboard for sheets_sync data.
+Bottle web dashboard for SQLite data.
 
 Run:
   python dashboard.py           # http://localhost:8080
@@ -9,22 +9,24 @@ Run:
   python dashboard.py --host 0.0.0.0 --port 8080
 
 Pages:
-  /                        - home: list all synced tables + last sync time
-  /table/<name>            - browse table with search, pagination, edit buttons
+  /                        - home: list all tables
+  /table/<name>            - browse table with search, pagination, edit/delete buttons
+  /table/<name>/new        - add a new row
   /table/<name>/edit/<id>  - edit a single row
+  /table/<name>/delete/<id>- delete a single row (POST)
+  /table/<name>/drop       - delete entire table (POST)
   /import                  - upload a CSV file → new/existing table
   /export/<name>           - download table as CSV
   /api/tables              - JSON: list of tables
   /api/table/<name>        - JSON: rows for table
-  /sync                    - POST: trigger a manual re-sync (runs sheets_sync.py)
 """
 
 import csv
+import html as _html
 import io
 import json
 import re
 import sqlite3
-import subprocess
 import sys
 import argparse
 from datetime import datetime, timezone
@@ -39,7 +41,11 @@ except ImportError:
     sys.exit(1)
 
 DB_FILE = Path(__file__).parent / "sheets_data.db"
-SYNC_SCRIPT = Path(__file__).parent / "sheets_sync.py"
+
+
+def h(value) -> str:
+    """HTML-escape a value for safe inline rendering."""
+    return _html.escape(str(value) if value is not None else "")
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +272,7 @@ BASE_CSS = """
 def nav(extra=""):
     return f"""<header>
   <span style="font-size:1.4rem">📊</span>
-  <a href="/">Sheets Dashboard</a>
+  <a href="/">Dashboard</a>
   {extra}
 </header>"""
 
@@ -292,44 +298,46 @@ def index():
     if tables:
         for t in tables:
             info = sync_info.get(t, {})
-            synced = info.get("synced_at", "never")
+            synced = info.get("synced_at", "—")
             count = info.get("row_count", "?")
             rows_html += f"""
             <tr>
-              <td><a class="table-link" href="/table/{t}">{t}</a></td>
-              <td><span class="badge">{count}</span></td>
-              <td>{synced}</td>
+              <td><a class="table-link" href="/table/{t}">{h(t)}</a></td>
+              <td><span class="badge">{h(count)}</span></td>
+              <td style="font-size:.82rem;color:#555">{h(synced)}</td>
               <td>
                 <div class="btn-group">
                   <a class="btn btn-primary btn-sm" href="/table/{t}">Browse</a>
-                  <a class="btn btn-success btn-sm" href="/export/{t}">CSV ↓</a>
+                  <a class="btn btn-success btn-sm" href="/table/{t}/new">+ Add row</a>
+                  <a class="btn btn-success btn-sm" href="/export/{t}">⬇ CSV</a>
                   <a class="btn btn-sm" style="background:#eee" href="/api/table/{t}">JSON</a>
+                  <form style="display:inline" method="POST" action="/table/{t}/drop"
+                        onsubmit="return confirm('Delete table {h(t)} and all its rows?')">
+                    <button class="btn btn-danger btn-sm" type="submit">Delete table</button>
+                  </form>
                 </div>
               </td>
             </tr>"""
     else:
-        rows_html = '<tr><td colspan="4" class="empty">No tables yet — sync from Google Sheets or import a CSV.</td></tr>'
+        rows_html = '<tr><td colspan="4" class="empty">No tables yet — import a CSV to get started.</td></tr>'
 
     return f"""<!DOCTYPE html>
 <html>
-<head>{BASE_CSS}<title>Sheets Dashboard</title></head>
+<head>{BASE_CSS}<title>Dashboard</title></head>
 <body>
 {nav()}
 <div class="container">
-  <h1>Google Sheets Dashboard</h1>
+  <h1>Dashboard</h1>
   {flash(msg, msg_type)}
   <div class="card">
     <div class="toolbar">
-      <strong>Synced Tables</strong>
+      <strong>Tables</strong>
       <div class="toolbar-right">
         <a class="btn btn-success" href="/import">⬆ Import CSV</a>
-        <form style="display:inline" method="POST" action="/sync">
-          <button class="btn btn-primary" type="submit">↻ Sync Google Sheets</button>
-        </form>
       </div>
     </div>
     <table>
-      <thead><tr><th>Table</th><th>Rows</th><th>Last Synced</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Table</th><th>Rows</th><th>Last Modified</th><th>Actions</th></tr></thead>
       <tbody>{rows_html}</tbody>
     </table>
   </div>
@@ -366,12 +374,20 @@ def browse_table(name):
     if rows:
         for r in rows:
             row_num = r.get("_row_num", "")
-            cells = "".join(f"<td>{r.get(c, '')}</td>" for c in data_cols)
+            cells = "".join(f"<td>{h(r.get(c, ''))}</td>" for c in data_cols)
             edit_url = f"/table/{name}/edit/{row_num}"
+            del_form = (
+                f'<form style="display:inline" method="POST" action="/table/{name}/delete/{row_num}"'
+                f' onsubmit="return confirm(\'Delete row {row_num}?\')">'
+                f'<button class="btn btn-danger btn-sm" type="submit">Delete</button></form>'
+            )
             tbody += (
                 f'<tr>{cells}'
-                f'<td class="edit-td">'
+                f'<td class="edit-td" style="white-space:nowrap">'
+                f'<div class="btn-group">'
                 f'<a class="btn btn-warning btn-sm" href="{edit_url}">Edit</a>'
+                f'{del_form}'
+                f'</div>'
                 f'</td></tr>'
             )
     else:
@@ -402,7 +418,7 @@ def browse_table(name):
 
     return f"""<!DOCTYPE html>
 <html>
-<head>{BASE_CSS}<title>{name} – Sheets Dashboard</title></head>
+<head>{BASE_CSS}<title>{h(name)} – Dashboard</title></head>
 <body>
 {nav(f'<span style="color:#aaa">/ <a style="color:#e2c275" href="/table/{name}">{name}</a></span>')}
 <div class="container">
@@ -416,6 +432,7 @@ def browse_table(name):
         {clear_btn}
       </form>
       <div class="toolbar-right">
+        <a class="btn btn-success btn-sm" href="/table/{name}/new">+ Add row</a>
         <a class="btn btn-success btn-sm" href="/export/{name}">⬇ Export CSV</a>
         <a class="btn btn-sm" style="background:#eee" href="/api/table/{name}">JSON</a>
       </div>
@@ -473,20 +490,19 @@ def edit_row(name, row_num):
     fields_html = ""
     for c in data_cols:
         val = row.get(c, "")
-        # Use textarea for long values, input for short ones
         if len(str(val)) > 80:
-            widget = f'<textarea name="{c}" rows="3">{val}</textarea>'
+            widget = f'<textarea name="{c}" rows="3">{h(val)}</textarea>'
         else:
-            widget = f'<input type="text" name="{c}" value="{val}">'
-        fields_html += f'<div class="form-group"><label>{c}</label>{widget}</div>'
+            widget = f'<input type="text" name="{c}" value="{h(val)}">'
+        fields_html += f'<div class="form-group"><label>{h(c)}</label>{widget}</div>'
 
     return f"""<!DOCTYPE html>
 <html>
-<head>{BASE_CSS}<title>Edit row {row_num} – {name}</title></head>
+<head>{BASE_CSS}<title>Edit row {row_num} – {h(name)}</title></head>
 <body>
-{nav(f'<span style="color:#aaa">/ <a style="color:#e2c275" href="/table/{name}">{name}</a> / edit row {row_num}</span>')}
+{nav(f'<span style="color:#aaa">/ <a style="color:#e2c275" href="/table/{name}">{h(name)}</a> / edit row {row_num}</span>')}
 <div class="container">
-  <h1>Edit row {row_num} in &ldquo;{name}&rdquo;</h1>
+  <h1>Edit row {row_num} in &ldquo;{h(name)}&rdquo;</h1>
   <div class="card" style="max-width:700px">
     <form method="POST" action="/table/{name}/edit/{row_num}">
       {fields_html}
@@ -495,9 +511,102 @@ def edit_row(name, row_num):
         <a class="btn btn-sm" style="background:#eee" href="/table/{name}">Cancel</a>
       </div>
     </form>
+    <hr style="margin:1.2rem 0;border:none;border-top:1px solid #eee">
+    <form method="POST" action="/table/{name}/delete/{row_num}"
+          onsubmit="return confirm('Permanently delete row {row_num}?')">
+      <button class="btn btn-danger btn-sm" type="submit">Delete this row</button>
+    </form>
   </div>
 </div>
 </body></html>"""
+
+
+# ---------------------------------------------------------------------------
+# Route: add a new row
+# ---------------------------------------------------------------------------
+
+@route("/table/<name>/new", method=["GET", "POST"])
+def new_row(name):
+    if name not in user_tables():
+        raise HTTPError(404, f"Table '{name}' not found")
+
+    cols = table_columns(name)
+    data_cols = [c for c in cols if not c.startswith("_")]
+    conn = get_conn()
+
+    if request.method == "POST":
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        result = conn.execute(
+            f'SELECT COALESCE(MAX(_row_num), 0) + 1 FROM "{name}"'
+        ).fetchone()
+        next_num = result[0]
+        col_names = ", ".join(f'"{c}"' for c in data_cols)
+        placeholders = ", ".join("?" for _ in data_cols)
+        values = [request.forms.get(c, "") for c in data_cols]
+        conn.execute(
+            f'INSERT INTO "{name}" (_row_num, _synced_at, {col_names}) VALUES (?, ?, {placeholders})',
+            [next_num, now] + values,
+        )
+        conn.commit()
+        conn.close()
+        bottle.redirect(f"/table/{name}?msg=Row+added.&type=success")
+
+    conn.close()
+    fields_html = "".join(
+        f'<div class="form-group"><label>{h(c)}</label>'
+        f'<input type="text" name="{c}" value=""></div>'
+        for c in data_cols
+    )
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>{BASE_CSS}<title>Add row – {h(name)}</title></head>
+<body>
+{nav(f'<span style="color:#aaa">/ <a style="color:#e2c275" href="/table/{name}">{h(name)}</a> / new row</span>')}
+<div class="container">
+  <h1>Add row to &ldquo;{h(name)}&rdquo;</h1>
+  <div class="card" style="max-width:700px">
+    <form method="POST" action="/table/{name}/new">
+      {fields_html}
+      <div class="btn-group">
+        <button class="btn btn-success" type="submit">Add row</button>
+        <a class="btn btn-sm" style="background:#eee" href="/table/{name}">Cancel</a>
+      </div>
+    </form>
+  </div>
+</div>
+</body></html>"""
+
+
+# ---------------------------------------------------------------------------
+# Route: delete a row
+# ---------------------------------------------------------------------------
+
+@route("/table/<name>/delete/<row_num:int>", method="POST")
+def delete_row(name, row_num):
+    if name not in user_tables():
+        raise HTTPError(404, f"Table '{name}' not found")
+    conn = get_conn()
+    conn.execute(f'DELETE FROM "{name}" WHERE _row_num = ?', [row_num])
+    conn.commit()
+    conn.close()
+    bottle.redirect(f"/table/{name}?msg=Row+{row_num}+deleted.&type=success")
+
+
+# ---------------------------------------------------------------------------
+# Route: drop an entire table
+# ---------------------------------------------------------------------------
+
+@route("/table/<name>/drop", method="POST")
+def drop_table(name):
+    if name not in user_tables():
+        raise HTTPError(404, f"Table '{name}' not found")
+    conn = get_conn()
+    conn.execute(f'DROP TABLE IF EXISTS "{name}"')
+    conn.execute("DELETE FROM _sync_log WHERE table_name = ?", [name])
+    conn.commit()
+    conn.close()
+    bottle.redirect(f"/?msg=Table+{quote(name)}+deleted.&type=success")
 
 
 # ---------------------------------------------------------------------------
@@ -538,7 +647,7 @@ def import_form():
 
     return f"""<!DOCTYPE html>
 <html>
-<head>{BASE_CSS}<title>Import CSV – Sheets Dashboard</title></head>
+<head>{BASE_CSS}<title>Import CSV – Dashboard</title></head>
 <body>
 {nav('<span style="color:#aaa">/ import CSV</span>')}
 <div class="container">
@@ -651,34 +760,11 @@ def api_table(name):
 
 
 # ---------------------------------------------------------------------------
-# Manual Google Sheets sync trigger
-# ---------------------------------------------------------------------------
-
-@route("/sync", method="POST")
-def trigger_sync():
-    try:
-        result = subprocess.run(
-            [sys.executable, str(SYNC_SCRIPT)],
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode == 0:
-            msg, msg_type = "Sync completed successfully.", "success"
-        else:
-            msg, msg_type = f"Sync failed: {result.stderr[:200]}", "error"
-    except subprocess.TimeoutExpired:
-        msg, msg_type = "Sync timed out after 120 seconds.", "error"
-    except Exception as e:
-        msg, msg_type = f"Error: {e}", "error"
-
-    bottle.redirect(f"/?msg={quote(msg)}&type={msg_type}")
-
-
-# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Sheets Dashboard (Bottle)")
+    parser = argparse.ArgumentParser(description="Data Dashboard (Bottle)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--debug", action="store_true")
